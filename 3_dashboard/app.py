@@ -162,27 +162,31 @@ def main():
 
     st.markdown("---")
 
+    # ── Optimización de Memoria Visual ──────────────────────────────────────────
+    # Extraemos solo los 150 eventos más recientes para graficar, 
+    # evitando que el JSON de Plotly colapse el navegador web.
+    df_charts = df.head(150)
+
     # ── Sección Gráfica Analítica (Dos Columnas Dinámicas) ──────────────────────
     col_chart1, col_chart2 = st.columns(2)
 
     with col_chart1:
         st.subheader("📈 Intensidad de Clicks vs Latencia Media")
-        # Gráfico de dispersión interactivo para mapear clústeres de comportamiento
         fig_scatter = px.scatter(
-            df, 
+            df_charts, # <-- Usamos el DataFrame reducido
             x="Clicks", 
             y="Latencia Media (ms)", 
             color="Dispositivo",
             size="Clicks",
             hover_data=["Usuario ID", "Capa Reglas", "Capa ML"],
-            color_discrete_sequence=px.colors.qualitative.Safe # Corregido a paleta estándar accesible
+            color_discrete_sequence=px.colors.qualitative.Safe
         )
         fig_scatter.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=350)
         st.plotly_chart(fig_scatter, use_container_width=True)
 
     with col_chart2:
-        st.subheader("📊 Distribución de Amenazas por Tipo de Dispositivo")
-        device_counts = df["Dispositivo"].value_counts().reset_index()
+        st.subheader("📊 Distribución de Amenazas (Últimos Eventos)")
+        device_counts = df_charts["Dispositivo"].value_counts().reset_index()
         device_counts.columns = ["Dispositivo", "Alertas"]
         
         fig_bar = px.bar(
