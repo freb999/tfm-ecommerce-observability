@@ -205,3 +205,4 @@ if __name__ == "__main__":
         logger.info("Servicio detenido por el usuario.")
     finally:
         detector.close()
+        

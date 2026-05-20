@@ -2,21 +2,16 @@
 ================================================================================
  TFM — Arquitectura de Stream Processing para Detección de Anomalías en E-commerce
  Módulo : flink_processor.py
- Capa   : 2 — Procesamiento en Flujo e Ingeniería de Características
+ Capa   : 2 — Procesamiento en Flujo e Ingeniería de Características (Con Sinks Múltiples)
  Autores: Benjamín Romero Fonseca / Luis Canales Quiñones
- Versión: 2.0.0
+ Versión: 2.1.0
  Python : 3.10.x
  Flink  : 1.18.1
 
  Descripción:
-     Orquestador analítico basado en Apache Flink que consume eventos crudos
-     desde Apache Kafka, ejecuta validación de esquemas, previene fallos por
-     datos malformados y agrupa el tráfico en Ventanas de Volteo (Tumbling Windows)
-     procesando métricas complejas por sesión para alimentar el modelo de ML.
-
- Uso:
-     python 2_processing/flink_processor.py
-     python 2_processing/flink_processor.py --window-size 15 --bootstrap-servers localhost:9094
+     Consume eventos crudos de Kafka, calcula vectores de características en 
+     ventanas de 10 segundos y ejecuta una salida doble: imprime en consola para 
+     auditoría local y publica en un nuevo topic de Kafka para el Isolation Forest.
 ================================================================================
 """
 
@@ -30,31 +25,34 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
 from pyflink.common.time import Time
 from pyflink.datastream import StreamExecutionEnvironment
-from pyflink.datastream.connectors.kafka import KafkaSource, KafkaOffsetsInitializer
+from pyflink.datastream.connectors.kafka import (
+    KafkaSource, 
+    KafkaOffsetsInitializer,
+    KafkaSink,
+    KafkaRecordSerializationSchema
+)
 from pyflink.datastream.window import TumblingProcessingTimeWindows
 from pyflink.common.watermark_strategy import WatermarkStrategy
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Configuración del Sistema de Logging Empresarial
+# Configuración del Sistema de Logging
 # ──────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] (%(filename)s:%(lineno)d) — %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Configuración Dinámica del Job (Inmutabilidad)
+# Configuración Dinámica del Job
 # ──────────────────────────────────────────────────────────────────────────────
 @dataclass(frozen=True)
 class JobConfig:
-    """Mantiene los parámetros de configuración global del pipeline de Flink."""
     bootstrap_servers: str
     source_topic: str
+    sink_topic: str  # <- Nuevo: Topic destino para el modelo de ML
     group_id: str
     window_size_seconds: int
     parallelism: int
@@ -62,21 +60,11 @@ class JobConfig:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Transformaciones y Funciones de Extracción (UDFs conceptuales)
+# Transformaciones Lógicas
 # ──────────────────────────────────────────────────────────────────────────────
 def safe_deserialize_and_map(json_str: str) -> tuple:
-    """
-    Deserializa de forma segura el JSON crudo proveniente de Kafka.
-    Aplica un patrón de tolerancia a fallos: si el JSON está roto o faltan campos,
-    captura la excepción, la registra en el log y emite una tupla de descarte
-    evitando que el pipeline de procesamiento en tiempo real colapse.
-    
-    Retorna una tupla estructurada bajo el esquema intermedio de Flink.
-    """
     try:
         payload = json.loads(json_str)
-        
-        # Extracción segura de tipos y normalización de variables analíticas
         session_id = str(payload.get("session_id", ""))
         user_id = str(payload.get("user_id", "anonymous"))
         ip_address = str(payload.get("ip_address", "0.0.0.0"))
@@ -87,7 +75,6 @@ def safe_deserialize_and_map(json_str: str) -> tuple:
         if not session_id:
             return ("CORRUPT_RECORD", "", "", "", 0, 0, 0, 0, 0, 0)
             
-        # Contadores individuales para la agregación por tipos de evento
         is_page_view = 1 if event_type == "page_view" else 0
         is_cart_add = 1 if event_type == "add_to_cart" else 0
         is_checkout = 1 if event_type == "checkout_start" else 0
@@ -95,48 +82,24 @@ def safe_deserialize_and_map(json_str: str) -> tuple:
         
         return (
             session_id, user_id, ip_address, device,
-            1,            # Contador general de eventos (clicks_total)
-            latency,      # Latencia acumulada
-            is_page_view, # Sumador específico page_view
-            is_cart_add,  # Sumador específico add_to_cart
-            is_checkout,  # Sumador específico checkout_start
-            is_purchase   # Sumador específico purchase
+            1, latency, is_page_view, is_cart_add, is_checkout, is_purchase
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as ex:
-        logger.warning("Registro malformado ignorado en el flujo de entrada: %s. Detalle: %s", json_str, ex)
+        logger.warning("Registro malformado ignorado: %s. Detalle: %s", json_str, ex)
         return ("CORRUPT_RECORD", "", "", "", 0, 0, 0, 0, 0, 0)
 
 
 def reduce_session_metrics(v1: tuple, v2: tuple) -> tuple:
-    """
-    Función de Reducción en Flujo. Suma de manera incremental los vectores
-    numéricos de dos eventos pertenecientes a la misma ventana y sesión.
-    Mantiene constantes las propiedades estructurales (IP, usuario, dispositivo).
-    """
     return (
-        v1[0], # session_id
-        v1[1], # user_id
-        v1[2], # ip_address
-        v1[3], # device
-        v1[4] + v2[4],   # clicks_total
-        v1[5] + v2[5],   # latency_total
-        v1[6] + v2[6],   # page_views_total
-        v1[7] + v2[7],   # cart_adds_total
-        v1[8] + v2[8],   # checkouts_total
-        v1[9] + v2[9]    # purchases_total
+        v1[0], v1[1], v1[2], v1[3],
+        v1[4] + v2[4], v1[5] + v2[5], v1[6] + v2[6], v1[7] + v2[7], v1[8] + v2[8], v1[9] + v2[9]
     )
 
 
 def build_final_feature_vector(reduced_tuple: tuple) -> str:
-    """
-    Formatea el resultado consolidado de la ventana y calcula métricas
-    derivadas promedio. Genera el vector final de características en formato JSON,
-    dejando el flujo listo para la Capa 3 (Detección de Anomalías).
-    """
     (session_id, user_id, ip_address, device, clicks, total_lat, 
      p_views, c_adds, checkouts, purchases) = reduced_tuple
     
-    # Prevenir división por cero de forma segura
     avg_latency = round(total_lat / clicks, 2) if clicks > 0 else 0.0
     
     feature_vector = {
@@ -157,10 +120,9 @@ def build_final_feature_vector(reduced_tuple: tuple) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Arquitectura del Pipeline Principal (Engine)
+# Arquitectura del Pipeline Principal
 # ──────────────────────────────────────────────────────────────────────────────
 class ECommerceStreamProcessor:
-    """Motor encargado de inicializar, orquestar y ejecutar el flujo analítico de Flink."""
     
     def __init__(self, config: JobConfig):
         self.config = config
@@ -168,23 +130,18 @@ class ECommerceStreamProcessor:
         self._setup_environment()
 
     def _setup_environment(self) -> None:
-        """Configura los parámetros del clúster Flink e inyecta dependencias Java."""
         self.env.set_parallelism(self.config.parallelism)
-        
-        # Localización dinámica y carga del conector JAR de Kafka
         base_dir = os.path.dirname(os.path.abspath(__file__))
         jar_absolute_path = os.path.join(base_dir, self.config.jar_name)
         
         if not os.path.exists(jar_absolute_path):
-            logger.critical("No se encontró el archivo conector requerido: %s", jar_absolute_path)
-            logger.critical("Por favor, valida el paso del Sprint 2 sobre descargas de conectores.")
+            logger.critical("No se encontró el conector JAR: %s", jar_absolute_path)
             sys.exit(1)
             
         self.env.add_jars(f"file://{jar_absolute_path}")
-        logger.info("Entorno Flink inicializado con el JAR cargado: %s", self.config.jar_name)
+        logger.info("Entorno Flink listo con JAR de Kafka cargado.")
 
     def _build_kafka_source(self) -> KafkaSource:
-        """Instancia el conector de entrada (Source) hacia el clúster de Kafka."""
         return KafkaSource.builder() \
             .set_bootstrap_servers(self.config.bootstrap_servers) \
             .set_topics(self.config.source_topic) \
@@ -193,101 +150,92 @@ class ECommerceStreamProcessor:
             .set_value_only_deserializer(SimpleStringSchema()) \
             .build()
 
+    def _build_kafka_sink(self) -> KafkaSink:
+        """
+        <- Nuevo método: Construye el conector de salida hacia Kafka.
+        Serializa las cadenas JSON de las características usando SimpleStringSchema.
+        """
+        return KafkaSink.builder() \
+            .set_bootstrap_servers(self.config.bootstrap_servers) \
+            .set_record_serializer(
+                KafkaRecordSerializationSchema.builder() \
+                    .set_topic(self.config.sink_topic) \
+                    .set_value_serialization_schema(SimpleStringSchema()) \
+                    .build()
+            ) \
+            .build()
+
     def pipeline_orquestator(self) -> None:
-        """Construye la topología del grafo de procesamiento de eventos dirigido."""
-        logger.info("Construyendo grafo analítico de procesamiento en flujo...")
+        logger.info("Construyendo topología analítica reactiva...")
         
-        # 1. Registro del Origen de datos (Consumer)
+        # 1. Source (Entrada de eventos de e-commerce)
         kafka_source = self._build_kafka_source()
-        raw_stream = self.env.from_source(
-            kafka_source, 
-            WatermarkStrategy.no_watermarks(), 
-            "Kafka_ECommerce_Source"
-        )
+        raw_stream = self.env.from_source(kafka_source, WatermarkStrategy.no_watermarks(), "Kafka_Source")
         
-        # Definición estricta de tipos intermedios para optimizar la serialización JVM-Python
         intermediate_type_schema = Types.TUPLE([
             Types.STRING(), Types.STRING(), Types.STRING(), Types.STRING(),
             Types.INT(), Types.INT(), Types.INT(), Types.INT(), Types.INT(), Types.INT()
         ])
 
-        # 2. Capa de Deserialización y Limpieza de Esquema
+        # 2. Map & Filter (Limpieza de datos)
         parsed_stream = raw_stream.map(
             safe_deserialize_and_map, 
             output_type=intermediate_type_schema
         ).filter(lambda record: record[0] != "CORRUPT_RECORD")
 
-        # 3. Operación de Enrutamiento y Agrupación por Clave Lógica (session_id)
+        # 3. KeyBy (Agrupación lógica por sesión)
         keyed_stream = parsed_stream.key_by(lambda record: record[0])
 
-        # 4. Estrategia de Ventanas Temporales Fijas (Tumbling Windows)
+        # 4. Window (Ventanas de procesamiento de 10 segundos)
         windowed_stream = keyed_stream.window(
             TumblingProcessingTimeWindows.of(Time.seconds(self.config.window_size_seconds))
         )
 
-        # 5. Reducción e Inferencia Incremental de Atributos
-        reduced_stream = windowed_stream.reduce(
-            reduce_session_metrics,
-            output_type=intermediate_type_schema
-        )
+        # 5. Reduce (Agregación de métricas en memoria JVM)
+        reduced_stream = windowed_stream.reduce(reduce_session_metrics, output_type=intermediate_type_schema)
 
-        # 6. Formateo y Generación del Vector Final Corporativo
-        final_feature_stream = reduced_stream.map(
-            build_final_feature_vector, 
-            output_type=Types.STRING()
-        )
+        # 6. Map Final (Generación del Vector de Características JSON)
+        final_feature_stream = reduced_stream.map(build_final_feature_vector, output_type=Types.STRING())
 
-        # 7. Salida del Flujo de Datos (Sink de Monitoreo)
+        # ──────────────────────────────────────────────────────────────────────
+        # ⚡ SALIDA DOBLE (BIFURCACIÓN DEL FLUJO)
+        # ──────────────────────────────────────────────────────────────────────
+        
+        # Salida A: Consola local para auditoría y desarrollo visual
         final_feature_stream.print()
         
-        # 8. Envío de la topología al clúster para su ejecución reactiva
-        logger.info("Ecosistema preparado. Enviando Job al motor de Flink...")
-        self.env.execute("TFM_ECommerce_Observability_Pipeline")
+        # Salida B: Inyección directa al nuevo topic de Kafka para el Isolation Forest
+        kafka_sink = self._build_kafka_sink()
+        final_feature_stream.sink_to(kafka_sink)
+        
+        # ──────────────────────────────────────────────────────────────────────
+        
+        logger.info("Topología configurada con salida doble (Consola + Kafka Sink). Ejecutando Job...")
+        self.env.execute("TFM_ECommerce_Observability_Pipeline_With_Sink")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Punto de entrada de la aplicación
-# ──────────────────────────────────────────────────────────────────────────────
 def parse_arguments() -> argparse.Namespace:
-    """Gestiona los argumentos de configuración por línea de comandos."""
-    parser = argparse.ArgumentParser(
-        description="Capa 2: Motor Core Flink de Ingeniería de Atributos — TFM"
-    )
-    parser.add_argument(
-        "--bootstrap-servers", default="localhost:9094",
-        help="Instancias del broker de Kafka (default: localhost:9094)"
-    )
-    parser.add_argument(
-        "--topic", default="ecommerce-events",
-        help="Tópico origen del clickstream (default: ecommerce-events)"
-    )
-    parser.add_argument(
-        "--group-id", default="tfm-analytics-group-prod",
-        help="Consumer Group oficial del Job (default: tfm-analytics-group-prod)"
-    )
-    parser.add_argument(
-        "--window-size", type=int, default=10,
-        help="Ancho de la ventana temporal en segundos (default: 10)"
-    )
-    parser.add_argument(
-        "--parallelism", type=int, default=1,
-        help="Grado de paralelismo de procesamiento del Job (default: 1)"
-    )
+    parser = argparse.ArgumentParser(description="Capa 2: Motor Core Flink de Ingeniería de Atributos — TFM")
+    parser.add_argument("--bootstrap-servers", default="localhost:9094", help="Broker de Kafka")
+    parser.add_argument("--source-topic", default="ecommerce-events", help="Topic de lectura cruda")
+    parser.add_argument("--sink-topic", default="retail-feature-vectors", help="Topic de salida procesada")
+    parser.add_argument("--group-id", default="tfm-analytics-group-prod", help="Consumer Group")
+    parser.add_argument("--window-size", type=int, default=10, help="Ventana en segundos")
+    parser.add_argument("--parallelism", type=int, default=1, help="Paralelismo")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_arguments()
     
-    # Inicialización del objeto inmutable de configuración corporativa
     job_config = JobConfig(
         bootstrap_servers=args.bootstrap_servers,
-        source_topic=args.topic,
+        source_topic=args.source_topic,
+        sink_topic=args.sink_topic, # Asignación del nuevo parámetro
         group_id=args.group_id,
         window_size_seconds=args.window_size,
         parallelism=args.parallelism
     )
     
-    # Instanciación y arranque del procesador
     processor = ECommerceStreamProcessor(job_config)
     processor.pipeline_orquestator()
