@@ -19,6 +19,8 @@
 import json
 import logging
 import sys
+import os
+import csv
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -183,6 +185,31 @@ class HybridAnomalyDetector:
                 # Emitir Alerta estructurada hacia Kafka
                 self.producer.send(self.config.alerts_topic, key=session_id.encode('utf-8'), value=alert_payload)
                 
+                # ── NUEVO: Persistencia en CSV para cumplir rúbrica del TFM ──
+                os.makedirs("data", exist_ok=True)
+                csv_file = "data/historical_alerts.csv"
+                file_exists = os.path.isfile(csv_file)
+                
+                with open(csv_file, mode="a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    if not file_exists:
+                        # Escribir la cabecera si el archivo es nuevo
+                        writer.writerow(["Timestamp", "Session_ID", "User_ID", "Device", "Clicks", "Avg_Latency_ms", "Rule_Triggered", "ML_Triggered", "ML_Score"])
+                    
+                    # Escribir la fila con los datos de la alerta
+                    writer.writerow([
+                        payload.get("timestamp"),
+                        session_id,
+                        payload.get("user_id"),
+                        payload.get("device"),
+                        metrics.get("clicks_count"),
+                        metrics.get("avg_latency_ms"),
+                        rule_triggered,
+                        ml_triggered,
+                        round(ml_score, 4) if ml_triggered else 0.0
+                    ])
+                # ─────────────────────────────────────────────────────────────
+                
                 # Print formateado en consola para auditoría visual
                 source_str = "REGLA" if rule_triggered else "MACHINE LEARNING"
                 logger.warning("🚨 [ALERTA - %s] Sesión: %s | Clicks: %d | Latencia Media: %.2fms", 
@@ -205,4 +232,3 @@ if __name__ == "__main__":
         logger.info("Servicio detenido por el usuario.")
     finally:
         detector.close()
-        

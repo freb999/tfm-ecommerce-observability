@@ -1,0 +1,13 @@
+2026-05-20 11:51:17,612 [INFO] <BrokerConnection node_id=bootstrap-0 host=localhost:9094 <connecting> [IPv6 ('::1', 9094, 0, 0)]>: connecting to localhost:9094 [('::1', 9094, 0, 0) IPv6]
+2026-05-20 11:51:17,612 [INFO] Probing node bootstrap-0 broker version
+2026-05-20 11:51:17,612 [INFO] <BrokerConnection node_id=bootstrap-0 host=localhost:9094 <connecting> [IPv6 ('::1', 9094, 0, 0)]>: Connection complete.
+2026-05-20 11:51:17,714 [INFO] Broker version identified as 2.6.0
+2026-05-20 11:51:17,714 [INFO] Set configuration api_version=(2, 6, 0) to skip auto check_version requests on startup
+2026-05-20 11:51:17,722 [INFO] 🚀 Iniciando generador | eps=30 | sesiones=10 | anomaly_ratio=0.08 | topic=ecommerce-events
+2026-05-20 11:51:17,723 [INFO] Presiona Ctrl+C para detener.
+
+2026-05-20 11:51:17,728 [INFO] <BrokerConnection node_id=1 host=localhost:9094 <connecting> [IPv6 ('::1', 9094, 0, 0)]>: connecting to localhost:9094 [('::1', 9094, 0, 0) IPv6]
+2026-05-20 11:51:17,729 [INFO] <BrokerConnection node_id=1 host=localhost:9094 <connecting> [IPv6 ('::1', 9094, 0, 0)]>: Connection complete.
+2026-05-20 11:51:17,729 [INFO] <BrokerConnection node_id=bootstrap-0 host=localhost:9094 <connected> [IPv6 ('::1', 9094, 0, 0)]>: Closing connection. 
+2026-05-20 11:51:51,109 [INFO] Enviados: 1000 eventos | Anomalías: 67 (6.7%)
+2026-05-20 11:52:24,528 [INFO] Enviados: 2000 eventos | Anomalías: 137 (6.9%)
