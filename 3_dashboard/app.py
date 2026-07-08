@@ -16,6 +16,8 @@
 import json
 import logging
 import sys
+import os       
+import sqlite3  
 import time
 from datetime import datetime
 import pandas as pd
@@ -64,17 +66,53 @@ def get_kafka_consumer(bootstrap_servers: str, topic: str, group_id: str) -> Kaf
 # ──────────────────────────────────────────────────────────────────────────────
 # Orquestador de Datos y UI
 # ──────────────────────────────────────────────────────────────────────────────
-def initialize_session_state():
-    """Mantiene el almacenamiento de datos persistente entre refrescos de pantalla."""
+def initialize_session_state(max_buffer: int):
+    """Mantiene el almacenamiento persistente y carga el histórico de SQLite al arrancar."""
     if "alerts_history" not in st.session_state:
         st.session_state.alerts_history = []
+        
+        # ── NUEVO: Rescate Histórico desde SQLite ──
+        db_path = "data/historical_alerts.db"
+        if os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                # Traemos las alertas más recientes (hasta el límite de tu slider)
+                query = f"SELECT raw_json FROM alerts ORDER BY id DESC LIMIT {max_buffer}"
+                df_db = pd.read_sql_query(query, conn)
+                conn.close()
+                
+                historial_recuperado = []
+                for _, row in df_db.iterrows():
+                    alert = json.loads(row["raw_json"])
+                    metrics = alert.get("metrics", {})
+                    src = alert.get("detection_source", {})
+                    
+                    flat_alert = {
+                        "Timestamp": alert.get("timestamp", datetime.now().isoformat()),
+                        "Sesión ID": alert.get("session_id", "Unknown"),
+                        "Usuario ID": alert.get("user_id", "Anonymous"),
+                        "IP": alert.get("ip_address", "0.0.0.0"),
+                        "Dispositivo": alert.get("device", "unknown"),
+                        "Clicks": metrics.get("clicks_count", 0),
+                        "Latencia Media (ms)": metrics.get("avg_latency_ms", 0.0),
+                        "Page Views": metrics.get("page_views_count", 0),
+                        "Cart Adds": metrics.get("cart_adds_count", 0),
+                        "Purchases": metrics.get("purchases_count", 0),
+                        "Capa Reglas": "🚨 Activada" if src.get("rule_layer_triggered") else "✅ Normal",
+                        "Capa ML": "🚨 Anomalía" if src.get("ml_layer_triggered") else "✅ Normal",
+                        "Motivo Regla": src.get("rule_reason") if src.get("rule_layer_triggered") else "N/A"
+                    }
+                    historial_recuperado.append(flat_alert)
+                
+                st.session_state.alerts_history = historial_recuperado
+            except Exception as e:
+                st.error(f"Error cargando histórico de base de datos: {e}")
+
     if "total_processed" not in st.session_state:
-        st.session_state.total_processed = 0
+        st.session_state.total_processed = len(st.session_state.alerts_history)
 
 def main():
-    initialize_session_state()
-    
-    # ── Barra Lateral de Configuración (Controles de Infraestructura) ──────────
+    # 1. Primero creamos los controles de la Sidebar
     st.sidebar.image("https://img.icons8.com/fluency/96/dashboard.png", width=60)
     st.sidebar.title("Infraestructura TFM")
     st.sidebar.markdown("---")
@@ -82,7 +120,11 @@ def main():
     broker = st.sidebar.text_input("Broker Kafka", value="localhost:9094")
     topic = st.sidebar.text_input("Tópico Alertas", value="ecommerce-alerts")
     
-    max_buffer = st.sidebar.slider("Tope de Memoria (Eventos)", min_value=100, max_value=2000, value=500)
+    # Capturamos el tope antes de arrancar la memoria
+    max_buffer = st.sidebar.slider("Tope de Memoria (Eventos)", min_value=100, max_value=2000, value=2000)
+    
+    # 2. AHORA inicializamos la memoria pasando el límite configurado (Llamado a la función)
+    initialize_session_state(max_buffer)
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Estado del Sistema:**")
@@ -158,7 +200,7 @@ def main():
     kpi1.metric("Alertas en Ventana", f"🚨 {total_alerts}", help="Total de sesiones marcadas en el buffer de memoria")
     kpi2.metric("Violación de Reglas", f"🛠️ {rules_count}", help="Sesiones capturadas por límites heurísticos deterministas")
     kpi3.metric("Detectado por IA (ML)", f"🧠 {ml_count}", help="Patrones estadísticos complejos aislados por Isolation Forest")
-    kpi4.metric("Bots Bloqueados", f"🤖 {bot_count}", help="Sesiones cuya firma corresponde al bot corporativo")
+    kpi4.metric("Bots Detectados", f"🤖 {bot_count}", help="Sesiones cuya firma corresponde al bot corporativo")
 
     st.markdown("---")
 

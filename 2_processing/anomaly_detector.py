@@ -21,6 +21,7 @@ import logging
 import sys
 import os
 import csv
+import sqlite3
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -83,6 +84,18 @@ class HybridAnomalyDetector:
                 bootstrap_servers=self.config.bootstrap_servers,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
+            # ── NUEVO: Conexión a Base de Datos Local SQLite ──
+            os.makedirs("data", exist_ok=True)
+            self.db_conn = sqlite3.connect("data/historical_alerts.db", check_same_thread=False)
+            self.db_cursor = self.db_conn.cursor()
+            self.db_cursor.execute('''
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    raw_json TEXT
+                )
+            ''')
+            self.db_conn.commit()
             logger.info("Conexión exitosa a Kafka. Escuchando características en '%s'...", self.config.source_topic)
         except Exception as e:
             logger.critical("Fallo catastrófico al conectar con la infraestructura: %s", e)
@@ -184,6 +197,16 @@ class HybridAnomalyDetector:
                 
                 # Emitir Alerta estructurada hacia Kafka
                 self.producer.send(self.config.alerts_topic, key=session_id.encode('utf-8'), value=alert_payload)
+
+                # ── NUEVO: Persistencia Robusta en SQLite ──
+                try:
+                    self.db_cursor.execute(
+                        "INSERT INTO alerts (timestamp, raw_json) VALUES (?, ?)",
+                        (payload.get("timestamp"), json.dumps(alert_payload, ensure_ascii=False))
+                    )
+                    self.db_conn.commit()
+                except Exception as e:
+                    logger.error("Error al guardar en SQLite: %s", e)
                 
                 # ── NUEVO: Persistencia en CSV para cumplir rúbrica del TFM ──
                 os.makedirs("data", exist_ok=True)
@@ -218,6 +241,7 @@ class HybridAnomalyDetector:
     def close(self) -> None:
         if self.consumer: self.consumer.close()
         if self.producer: self.producer.close()
+        if hasattr(self, 'db_conn'): self.db_conn.close()
         logger.info("Conexiones del detector cerradas limpiamente.")
 
 
