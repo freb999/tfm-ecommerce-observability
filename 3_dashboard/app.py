@@ -2,7 +2,7 @@
 ================================================================================
  TFM — Arquitectura de Stream Processing para Detección de Anomalías en E-commerce
  Módulo : app.py
- Capa   : 3 — Interfaz Gráfica y Monitoreo Analítico en Tiempo Real
+ Capa   : 5 — Interfaz Gráfica y Monitoreo Analítico en Tiempo Real
  Autores: Benjamín Romero Fonseca / Luis Canales Quiñones
  Versión: 2.0.0 (Persistencia DB + PyVis + Matplotlib)
 ================================================================================
@@ -325,7 +325,7 @@ def main():
     
     broker = st.sidebar.text_input("Broker Kafka", value="localhost:9094")
     topic = st.sidebar.text_input("Tópico Alertas", value="ecommerce-alerts")
-    max_buffer = st.sidebar.slider("Tope de Memoria (Eventos)", min_value=100, max_value=10000, value=2000)
+    max_buffer = st.sidebar.slider("Tope de Memoria (Eventos)", min_value=100, max_value=2000, value=1200)
     
     st.sidebar.markdown("---")
     tipo_grafo = st.sidebar.selectbox(
@@ -335,7 +335,7 @@ def main():
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("**🎛️ Filtros de Claridad Visual**")
-    umbral_ruido = st.sidebar.slider("Ocultar flechas con menos de X clics", min_value=1, max_value=10000, value=1, help="Limpia la telaraña ocultando clics aislados.")
+    umbral_ruido = st.sidebar.slider("Ocultar flechas con menos de X clics", min_value=1, max_value=5000, value=1, help="Limpia la telaraña ocultando clics aislados.")
     solo_anomalias = st.sidebar.checkbox("🚨 Mostrar SOLO Anomalías (Rojo)", value=False)
 
     initialize_session_state(max_buffer)

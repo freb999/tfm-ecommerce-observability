@@ -2,7 +2,7 @@
 ================================================================================
  TFM — Arquitectura de Stream Processing para Detección de Anomalías en E-commerce
  Módulo : anomaly_detector.py
- Capa   : 3 — Inteligencia y Detección Híbrida (Reglas + Machine Learning)
+ Capa   : 4 — Inteligencia y Detección Híbrida (Reglas + Machine Learning)
  Autores: Benjamín Romero Fonseca / Luis Canales Quiñones
  Versión: 1.0.0
  Python : 3.10.x
